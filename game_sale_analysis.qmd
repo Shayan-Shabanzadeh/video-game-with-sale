@@ -179,7 +179,7 @@ top_platforms <- platform_trends %>%
   group_by(Platform) %>%
   summarise(Total_Sales = sum(Total_Sales)) %>%
   arrange(desc(Total_Sales)) %>%
-  slice(1:10)
+  dplyr::slice(1:10)
 
 platform_trends_filtered <- platform_trends %>%
   filter(Platform %in% top_platforms$Platform) %>%
@@ -427,15 +427,21 @@ We perform 10-fold cross-validation over a grid of lambda values to identify the
 ```{r}
 set.seed(123)
 
-lambda_grid <- 10^seq(2, -2, length = 100)  
+x_train_lasso <- x_train_ridge
+y_train_lasso <- y_train_ridge
 
-suppressWarnings(lasso_model <- train(
+x_test_lasso <- x_test_ridge
+y_test_lasso <- y_test_ridge
+
+lambda_grid <- 10^seq(2, -2, length = 100)
+
+lasso_model <- train(
   Log_Global_Sales ~ ., 
   data = train_data, 
   method = "glmnet",
   trControl = trainControl(method = "cv", number = 10),
   tuneGrid = expand.grid(alpha = 1, lambda = lambda_grid)
-))
+)
 
 ```
 
@@ -449,6 +455,7 @@ lasso_r2 <- cor(y_test_lasso, lasso_predictions)^2
 
 cat("Lasso Test RMSE:", lasso_rmse, "\n")
 cat("Lasso Test R²:", lasso_r2, "\n")
+
 ```
 
 ### Feature Importance
@@ -1049,7 +1056,22 @@ Below are some questions and insights raised from the SHAP visualizations:
 
 ```{r}
 library(SHAPforxgboost)
+test_data_xgb_copy <- test_data_xgb
 
+genre_cols <- c("GenreFighting", "GenreMisc", "GenrePlatform", 
+                "GenreRacing", "GenreRole.Playing", "GenreShooter", "GenreSports")
+
+test_data_xgb_copy[genre_cols] <- lapply(test_data_xgb_copy[genre_cols], as.numeric)
+
+test_data_xgb_copy$Genre <- apply(test_data_xgb_copy[genre_cols], 1, function(row) {
+  selected_genres <- genre_cols[row > 0]
+  selected_genres <- gsub("Genre", "", selected_genres) 
+  if (length(selected_genres) > 0) {
+    paste(selected_genres, collapse = ", ") 
+  } else {
+    "Other"  
+  }
+})
 X_test_matrix <- as.matrix(test_data_xgb[, feature_cols])
 
 params_shap <- params
@@ -1441,10 +1463,6 @@ ggplot(shap_platform_genre_long, aes(x = Genre, y = Platform, fill = Mean_Impact
 ```
 
 The heatmap reveals that Shooter games consistently have the highest positive SHAP impact across platforms like PS2, PS3, PSP, and X360, highlighting a strong genre-platform synergy. Platform and Racing genres also show moderate success on platforms like PC and Wii, while genres such as Misc and Other exhibit varied influence depending on the system. This suggests genre preference is closely tied to platform user demographics and game optimization.
-
-Absolutely! Here's an enhanced and more impactful **Section 6** that emphasizes the broader value of your project and the significance of your findings — especially the strength of the XGBoost model.
-
----
 
 ## 6. Conclusion & Real-World Impact
 
