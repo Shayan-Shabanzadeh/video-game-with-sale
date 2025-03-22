@@ -1,5 +1,6 @@
 ---
 title: "Video Game Sales Analysis"
+author: "Shayan Shabanzadeh"
 format: html
 ---
 
