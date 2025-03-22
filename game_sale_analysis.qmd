@@ -1,0 +1,205 @@
+---
+title: "Video Game Sales Analysis"
+format: html
+---
+
+# Load the Libraries
+
+```{r}
+suppressPackageStartupMessages({
+  suppressWarnings({
+    library(tidyverse)
+    library(ggplot2)
+    library(gridExtra)
+    library(dplyr)
+    library(naniar)
+    library(reshape2)
+    library(caret)
+    library(forcats)
+    library(glmnet)
+    library(car)
+    library(patchwork)
+    library(rpart)
+    library(rpart.plot)
+    library(bestNormalize)
+  })
+})
+
+```
+
+# 1. Introduction
+
+The purpose of this analysis is to explore the factors that drive video game sales using various statistical techniques. The study focuses on understanding what influences a game's long-term success, how ratings impact sales, and how different platforms and genres affect sales patterns.
+
+The analysis leverages multiple regression models, regularization techniques such as ridge and lasso regression for feature selection, and time-series analysis to identify sales trends over time.
+
+**Key Objectives:** - To determine which factors contribute to a game’s long-term commercial success. - To analyze whether critic ratings or user ratings have a stronger influence on sales. - To examine the impact of game genres on sales stability. - To investigate how platform choices influence a game's overall success.
+
+The dataset used in this study is a publicly available video game sales dataset, which includes information such as platform, genre, publisher, critic scores, user scores, and sales figures across different regions. The dataset provides historical insights into the video game industry and allows for a detailed exploration of market trends and factors affecting sales performance.
+
+# 2. Data Preprocessing
+
+## 2.1 Loading the Data
+
+```{r}
+games <- read.csv("./video_game_sales.csv")
+str(games)
+summary(games)
+```
+
+## 2.2 Handling Missing Values
+
+```{r}
+gg_miss_var(games)
+games <- na.omit(games)
+```
+
+## 2.3 Feature Engineering
+
+```{r}
+games <- games %>%
+  mutate(
+    Year_of_Release = suppressWarnings(as.numeric(as.character(Year_of_Release))),
+    User_Score = as.numeric(User_Score),
+    Platform = as.factor(Platform),
+    Genre = as.factor(Genre),
+    Publisher = as.factor(Publisher),
+    Rating = as.factor(Rating)
+  ) %>%
+  filter(!is.na(Year_of_Release))
+```
+
+## 2.4 Data Transformation
+
+### 2.4.1 Log Transformation for Global Sales
+
+```{r}
+games$Log_Global_Sales <- log(games$Global_Sales + 1)
+```
+
+# 3. Exploratory Data Analysis (EDA)
+
+## 3.1 Sales Distribution
+
+To better understand the distribution of Global_Sales, we first plotted its raw values. As shown, the data is highly skewed and long-tailed, with most values clustered near zero and a few extremely large sales figures. To address this skewness, we applied a log₁₀ transformation, which compresses large values and spreads out smaller ones, resulting in a more balanced distribution. Additionally, we used the Yeo-Johnson transformation to further normalize the data and improve its symmetry for modeling purposes.
+
+### Yeo-Johnson Transformation
+
+```{r}
+games_yj <- games 
+yj_transform <- bestNormalize(games_yj$Global_Sales, standardize = FALSE)
+games_yj$Normalized_Global_Sales <- predict(yj_transform)
+```
+
+### Distribution Plots
+
+```{r}
+p1 <- ggplot(games, aes(x = Global_Sales)) +
+  geom_histogram(bins = 50, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Distribution of Global Sales", x = "Global Sales (Millions)", y = "Count")
+
+games_log <- games
+games_log$Log_Global_Sales <- log10(games_log$Global_Sales + 1)
+
+p2 <- ggplot(games_log, aes(x = Log_Global_Sales)) +
+  geom_histogram(bins = 50, fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Distribution of Global Sales (Log Scale)", x = "Log10(Global Sales)", y = "Count")
+
+p3 <- ggplot(games_yj, aes(x = Normalized_Global_Sales)) +
+  geom_histogram(bins = 50, fill = "purple", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Distribution of Global Sales (Yeo-Johnson)", x = "Yeo-Johnson Transformed Sales", y = "Count")
+
+grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+## 3.2 Correlation Analysis
+
+```{r}
+numerical_cols <- c("Year_of_Release", "Normalized_Global_Sales", "Critic_Score", 
+                    "Critic_Count", "User_Score", "User_Count")
+
+correlation_matrix <- cor(games_yj[, numerical_cols], use = "complete.obs")
+correlation_long <- melt(correlation_matrix)
+
+ggplot(correlation_long, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab",
+                       name = "Correlation") +
+  theme_minimal() +
+  labs(title = "Correlation Matrix of Numerical Features with Global Sales") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 3.3 Scatter Plots: Ratings vs. Sales
+
+```{r}
+ggplot(games_log, aes(x = Critic_Score, y = Log_Global_Sales)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  geom_smooth(method = "lm", color = "red") +
+  theme_minimal() +
+  labs(title = "Critic Score vs Global Sales", x = "Critic Score", y = "Global Sales (Log 10)")
+```
+
+```{r}
+ggplot(games_log, aes(x = User_Score, y = Log_Global_Sales)) +
+  geom_point(alpha = 0.6, color = "green") +
+  geom_smooth(method = "lm", color = "red") +
+  theme_minimal() +
+  labs(title = "User Score vs Global Sales", x = "User Score", y = "Global Sales (Log 10)")
+```
+
+## 3.4 Sales Trends Over Time
+
+```{r}
+yearly_sales <- games %>%
+  group_by(Year_of_Release) %>%
+  summarise(Total_Sales = sum(Global_Sales, na.rm = TRUE))
+
+ggplot(yearly_sales, aes(x = Year_of_Release, y = Total_Sales)) +
+  geom_line(linewidth = 1, color = "blue") +
+  geom_point(linewidth = 2, color = "red") +
+  theme_minimal() +
+  labs(title = "Total Video Game Sales Over Time", x = "Year", y = "Total Sales (Millions)")
+```
+
+in## 3.5 Platform Popularity Over Time
+
+```{r}
+platform_trends <- games %>%
+  group_by(Year_of_Release, Platform) %>%
+  summarise(Total_Sales = sum(Global_Sales, na.rm = TRUE)) %>%
+  filter(!is.na(Year_of_Release))
+
+top_platforms <- platform_trends %>%
+  group_by(Platform) %>%
+  summarise(Total_Sales = sum(Total_Sales)) %>%
+  arrange(desc(Total_Sales)) %>%
+  slice(1:10)
+
+platform_trends_filtered <- platform_trends %>%
+  filter(Platform %in% top_platforms$Platform) %>%
+  mutate(Platform = fct_reorder(Platform, Total_Sales, .fun = sum, .desc = TRUE))
+
+ggplot(platform_trends_filtered, aes(x = Year_of_Release, y = Total_Sales, fill = Platform)) +
+  geom_area(position = "stack", alpha = 0.85, color = "white", size = 0.3) +
+  theme_minimal() +
+  labs(title = "Platform Sales Over Time", x = "Year", y = "Total Sales (Millions)")
+```
+
+## 3.6 Genre Trends Over Time
+
+```{r}
+genre_trends <- games %>%
+  group_by(Year_of_Release, Genre) %>%
+  summarise(Total_Sales = sum(Global_Sales, na.rm = TRUE)) %>%
+  filter(!is.na(Year_of_Release))
+
+ggplot(genre_trends, aes(x = Year_of_Release, y = Total_Sales, fill = Genre)) +
+  geom_area(position = "stack", alpha = 0.85, color = "white", size = 0.3) +
+  theme_minimal() +
+  labs(title = "Genre Trends Over Time", x = "Year", y = "Total Sales (Millions)")
+```
