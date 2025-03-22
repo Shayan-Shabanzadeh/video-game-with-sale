@@ -203,3 +203,524 @@ ggplot(genre_trends, aes(x = Year_of_Release, y = Total_Sales, fill = Genre)) +
   theme_minimal() +
   labs(title = "Genre Trends Over Time", x = "Year", y = "Total Sales (Millions)")
 ```
+
+
+# 4. Regression Models
+
+This section evaluates different regression models to understand the factors influencing video game sales. We compare **multiple linear regression (MLR)**, **ridge regression**, **lasso regression**, and **polynomial regression** based on predictive performance, feature importance, and residual analysis.
+
+## 4.1 Data Preprocessing and Train-Test Split
+
+Before applying regression models, we **scale numerical features, encode categorical variables**, and **split the dataset into training and testing sets**.
+
+### Preprocessing
+
+We apply **one-hot encoding** to categorical variables and **feature scaling** to ensure a normalized input space for regression.
+
+```{r}
+library(dplyr)
+
+# Load and clean the dataset
+games <- read.csv("./video_game_sales.csv") %>% na.omit()
+games <- games %>% dplyr::select(-Name, -NA_Sales, -EU_Sales, -JP_Sales, -Other_Sales)
+
+games <- games %>%
+  mutate(
+    Year_of_Release = suppressWarnings(as.numeric(as.character(Year_of_Release))),
+    User_Score = as.numeric(User_Score),
+    Platform = as.factor(Platform),
+    Genre = as.factor(Genre),
+    Publisher = as.factor(Publisher),
+    Rating = as.factor(Rating),
+    Log_Global_Sales = log1p(Global_Sales)
+  ) %>%
+  filter(!is.na(Year_of_Release))
+
+# One-hot encoding (excluding Global_Sales from formula)
+games_encoded <- model.matrix(Log_Global_Sales ~ . - Global_Sales, data = games) %>% as.data.frame()
+
+# Make categorical columns binary (model.matrix already does this, but just in case)
+categorical_cols <- grep("^(Platform|Genre|Publisher|Rating)", colnames(games_encoded), value = TRUE)
+games_encoded[categorical_cols] <- lapply(games_encoded[categorical_cols], function(x) as.integer(x > 0))
+
+# Clean column names
+colnames(games_encoded) <- make.names(colnames(games_encoded), unique = TRUE)
+
+# Restore target variable
+games_encoded$Log_Global_Sales <- log1p(games$Global_Sales)
+
+# Remove near-zero variance predictors
+nzv_cols <- nearZeroVar(games_encoded, saveMetrics = TRUE)
+games_encoded <- games_encoded[, !nzv_cols$nzv]
+
+# Scale all features (including Year_of_Release)
+preprocess_model <- preProcess(
+  games_encoded[, !(colnames(games_encoded) %in% c("Log_Global_Sales"))],
+  method = c("center", "scale")
+)
+
+games_scaled <- games_encoded
+games_scaled[, !(colnames(games_scaled) %in% c("Log_Global_Sales"))] <-
+  predict(preprocess_model, games_encoded[, !(colnames(games_encoded) %in% c("Log_Global_Sales"))])
+
+# Cross-validation setup
+train_control <- trainControl(method = "cv", number = 10)
+
+```
+
+### Train-Test Split
+
+We split the dataset into **80% training and 20% testing** for model evaluation.
+
+```{r}
+set.seed(123)
+train_index <- createDataPartition(games_scaled$Log_Global_Sales, p = 0.8, list = FALSE)
+train_data <- games_scaled[train_index, ]
+test_data <- games_scaled[-train_index, ]
+```
+
+
+## 4.2 Multiple Linear Regression (MLR)
+
+We train a **multiple linear regression model** as a baseline.
+
+```{r}
+set.seed(123)
+mlr_model <- train(
+  Log_Global_Sales ~ ., 
+  data = train_data, 
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+)
+```
+
+
+### Performance Evaluation
+
+```{r}
+mlr_predictions <- predict(mlr_model, test_data)
+
+# Compute RMSE and R²
+mlr_rmse <- sqrt(mean((test_data$Log_Global_Sales - mlr_predictions)^2))
+mlr_r2 <- cor(test_data$Log_Global_Sales, mlr_predictions)^2  
+
+cat("MLR Test RMSE:", mlr_rmse, "\n")
+cat("MLR Test R²:", mlr_r2, "\n")
+```
+
+
+
+### Residual Analysis
+
+```{r}
+par(mfrow = c(2, 2))
+plot(mlr_model$finalModel)
+```
+
+The residual diagnostic plots for the Multiple Linear Regression (MLR) model reveal several key issues. The Residuals vs Fitted plot shows a curved pattern, indicating that the linear model does not fully capture the underlying structure, suggesting non-linearity. The Q-Q plot exhibits heavy tails, showing that the residuals deviate from normality. The Scale-Location plot confirms heteroscedasticity, with residual spread increasing as fitted values grow. Finally, the Residuals vs Leverage plot highlights a few influential observations beyond Cook’s distance, suggesting the presence of outliers with high leverage.These patterns suggest that a more flexible or non-linear model may be more appropriate for this data.
+
+
+## 4.3 Ridge Regression
+
+Ridge regression applies **L2 regularization** to shrink coefficients and prevent overfitting.
+
+### Model Training & Hyperparameter Tuning
+
+We perform 10-fold cross-validation over a grid of lambda values to identify the optimal regularization strength.
+
+```{r}
+set.seed(123)
+
+x_train_ridge <- as.matrix(train_data[, colnames(train_data) != "Log_Global_Sales"])
+y_train_ridge <- train_data$Log_Global_Sales
+
+x_test_ridge <- as.matrix(test_data[, colnames(test_data) != "Log_Global_Sales"])
+y_test_ridge <- test_data$Log_Global_Sales
+
+lambda_grid <- 10^seq(2, -2, length = 100)
+
+ridge_model <- train(
+  Log_Global_Sales ~ ., 
+  data = train_data,
+  method = "glmnet",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = expand.grid(alpha = 0, lambda = lambda_grid) 
+)
+
+```
+
+### Performance Metrics
+
+```{r}
+ridge_predictions <- predict(ridge_model, newdata = test_data)  # Use test_ridge_data instead of x_test
+
+ridge_rmse <- sqrt(mean((test_data$Log_Global_Sales - ridge_predictions)^2))  
+
+ridge_r2 <- cor(test_data$Log_Global_Sales, ridge_predictions)^2  
+
+cat("Ridge Test RMSE:", ridge_rmse, "\n")
+cat("Ridge Test R²:", ridge_r2, "\n")
+
+```
+
+### Feature Importance
+We extract the coefficients associated with the best lambda to inspect the influence of features.
+
+
+```{r}
+best_lambda_ridge <- ridge_model$bestTune$lambda
+final_ridge <- glmnet(x_train_ridge, y_train_ridge, alpha = 0, lambda = best_lambda_ridge)
+ridge_coefs <- coef(final_ridge)
+
+coef_df <- data.frame(
+  Feature = rownames(ridge_coefs),
+  Coefficient = as.numeric(ridge_coefs)
+)
+
+top_ridge_features <- coef_df %>%
+  filter(Feature != "(Intercept)") %>%
+  arrange(desc(abs(Coefficient))) %>%
+  head(10)
+
+print(top_ridge_features)
+
+```
+
+### Residual Analysis
+
+```{r}
+par(mfrow = c(2, 2))
+
+# 1. Residuals vs Fitted
+ridge_residuals <- y_test_ridge - ridge_predictions
+plot(ridge_predictions, ridge_residuals,
+     main = "Residuals vs Fitted",
+     xlab = "Fitted Values (Predicted Sales)",
+     ylab = "Residuals",
+     pch = 16, col = "black")
+abline(h = 0, col = "red")
+
+# 2. Normal Q-Q
+qqnorm(ridge_residuals, main = "Normal Q-Q")
+qqline(ridge_residuals, col = "red", lwd = 2)
+
+# 3. Scale-Location Plot
+plot(ridge_predictions, sqrt(abs(ridge_residuals)),
+     main = "Scale-Location",
+     xlab = "Fitted Values",
+     ylab = "√|Residuals|",
+     pch = 16, col = "black")
+abline(h = 0, col = "red")
+
+# 4. Residuals vs Leverage
+ridge_hatvalues <- hatvalues(lm(y_test_ridge ~ x_test_ridge))
+plot(ridge_hatvalues, ridge_residuals,
+     main = "Residuals vs Leverage",
+     xlab = "Leverage",
+     ylab = "Residuals",
+     pch = 16, col = "black")
+abline(h = 0, col = "red")
+
+```
+
+## 4.4 Lasso Regression
+
+Lasso regression applies **L1 regularization**, forcing some coefficients to zero, effectively performing feature selection.
+
+### Model Training & Hyperparameter Tuning
+
+We perform 10-fold cross-validation over a grid of lambda values to identify the optimal regularization strength for Lasso.
+
+```{r}
+set.seed(123)
+
+lambda_grid <- 10^seq(2, -2, length = 100)  
+
+suppressWarnings(lasso_model <- train(
+  Log_Global_Sales ~ ., 
+  data = train_data, 
+  method = "glmnet",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = expand.grid(alpha = 1, lambda = lambda_grid)
+))
+
+```
+
+### Performance Metrics
+
+```{r}
+lasso_predictions <- predict(lasso_model, newdata = test_data)
+
+lasso_rmse <- sqrt(mean((y_test_lasso - lasso_predictions)^2))
+lasso_r2 <- cor(y_test_lasso, lasso_predictions)^2
+
+cat("Lasso Test RMSE:", lasso_rmse, "\n")
+cat("Lasso Test R²:", lasso_r2, "\n")
+```
+
+### Feature Importance
+
+We extract the top predictors selected by Lasso based on their absolute coefficient values. Features with a coefficient of zero are automatically excluded.
+
+```{r}
+best_lambda_lasso <- lasso_model$bestTune$lambda
+final_lasso <- glmnet(x_train_lasso, y_train_lasso, alpha = 1, lambda = best_lambda_lasso)
+
+lasso_coefs <- coef(final_lasso)
+
+coef_df_lasso <- data.frame(
+  Feature = rownames(lasso_coefs),
+  Coefficient = as.numeric(lasso_coefs)
+)
+
+top_lasso_features <- coef_df_lasso %>%
+  filter(Feature != "(Intercept)", Coefficient != 0) %>%
+  arrange(desc(abs(Coefficient))) %>%
+  head(10)
+
+print(top_lasso_features)
+```
+
+### Residual Analysis
+
+```{r}
+par(mfrow = c(2, 2))
+
+# 1. Residuals vs Fitted
+lasso_residuals <- y_test_lasso - lasso_predictions
+plot(lasso_predictions, lasso_residuals,
+     main = "Residuals vs Fitted",
+     xlab = "Fitted Values (Predicted Sales)",
+     ylab = "Residuals",
+     pch = 16, col = "black")
+abline(h = 0, col = "red")
+
+# 2. Normal Q-Q
+qqnorm(lasso_residuals, main = "Normal Q-Q")
+qqline(lasso_residuals, col = "red", lwd = 2)
+
+# 3. Scale-Location Plot
+plot(lasso_predictions, sqrt(abs(lasso_residuals)),
+     main = "Scale-Location",
+     xlab = "Fitted Values",
+     ylab = "√|Residuals|",
+     pch = 16, col = "black")
+abline(h = 0, col = "red")
+
+# 4. Residuals vs Leverage
+lasso_hatvalues <- hatvalues(lm(y_test_lasso ~ x_test_lasso))
+plot(lasso_hatvalues, lasso_residuals,
+     main = "Residuals vs Leverage",
+     xlab = "Leverage",
+     ylab = "Residuals",
+     pch = 16, col = "black")
+abline(h = 0, col = "red")
+```
+Lasso regression offers slight improvement over MLR by reducing overfitting and selecting key features, but the diagnostic plots still reveal issues like heteroscedasticity and non-linearity. While performance isn't significantly better, Lasso and Ridge together help identify the most influential variables. This allows us to explore meaningful interaction terms between top features, which may capture deeper patterns and improve model performance.
+
+
+## 4.5 Feature Importance from Ridge & Lasso Regression
+
+To better understand what drives video game sales, we examine the most influential features identified by Ridge and Lasso regression. Ridge retains all features by shrinking their coefficients, while Lasso performs variable selection by reducing some coefficients to zero. Comparing the two highlights both consistently strong predictors and features dropped due to low importance.
+
+
+```{r}
+ridge_coefs <- as.data.frame(as.matrix(coef(final_ridge)))
+ridge_coefs$Feature <- rownames(ridge_coefs) 
+colnames(ridge_coefs)[1] <- "Coefficient"
+
+lasso_coefs <- as.data.frame(as.matrix(coef(final_lasso)))
+lasso_coefs$Feature <- rownames(lasso_coefs)
+colnames(lasso_coefs)[1] <- "Coefficient"
+
+ridge_coefs$Model <- "Ridge"
+lasso_coefs$Model <- "Lasso"
+
+feature_importance <- rbind(ridge_coefs, lasso_coefs)
+
+feature_importance <- feature_importance %>%
+  filter(Feature != "(Intercept)") %>%  # Drop Intercept
+  arrange(desc(abs(Coefficient))) %>%
+  head(30)
+
+ggplot(feature_importance, aes(x = reorder(Feature, abs(Coefficient)), y = abs(Coefficient), fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Top Features Influencing Video Game Sales",
+       x = "Feature", y = "Coefficient Magnitude") +
+  theme_minimal()
+
+```
+
+## 4.6 Multiple Linear Regression with Interaction Terms
+
+```{r}
+train_data_interaction <- train_data
+test_data_interaction <- test_data
+
+train_data_interaction <- train_data_interaction %>%
+  mutate(
+    Critic_Interaction = Critic_Score * Critic_Count,
+    User_Interaction = User_Score * User_Count,
+    Critic_User_Score = Critic_Score * User_Score,
+    Critic_User_Count = Critic_Count * User_Count,
+    Platform_PC_Year = PlatformPC * Year_of_Release,  
+    Platform_Wii_Year = PlatformWii * Year_of_Release,
+    Platform_X360_Year = PlatformX360 * Year_of_Release,
+    Platform_PS3_Year = PlatformPS3 * Year_of_Release,
+    Genre_Shooter_Critic = GenreShooter * Critic_Score,
+    Genre_Sports_User = GenreSports * User_Score,
+    Publisher_EA_Critic = `PublisherElectronic.Arts` * Critic_Score,
+    Publisher_Ubisoft_User = PublisherUbisoft * User_Score
+  )
+
+test_data_interaction <- test_data_interaction %>%
+  mutate(
+    Critic_Interaction = Critic_Score * Critic_Count,
+    User_Interaction = User_Score * User_Count,
+    Critic_User_Score = Critic_Score * User_Score,
+    Critic_User_Count = Critic_Count * User_Count,
+    Platform_PC_Year = PlatformPC * Year_of_Release,  
+    Platform_Wii_Year = PlatformWii * Year_of_Release,
+    Platform_X360_Year = PlatformX360 * Year_of_Release,
+    Platform_PS3_Year = PlatformPS3 * Year_of_Release,
+    Genre_Shooter_Critic = GenreShooter * Critic_Score,
+    Genre_Sports_User = GenreSports * User_Score,
+    Publisher_EA_Critic = `PublisherElectronic.Arts` * Critic_Score,
+    Publisher_Ubisoft_User = PublisherUbisoft * User_Score
+  )
+
+```
+
+```{r}
+set.seed(123)
+mlr_interaction_model <- suppressWarnings(train(
+  Log_Global_Sales ~ .,
+  data = train_data_interaction, 
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+))
+```
+
+```{r}
+interaction_predictions <- predict(mlr_interaction_model, test_data_interaction)
+
+interaction_rmse <- sqrt(mean((test_data_interaction$Log_Global_Sales - interaction_predictions)^2))
+interaction_r2 <- cor(test_data_interaction$Log_Global_Sales, interaction_predictions)^2  
+
+cat("Interaction Model Test RMSE:", interaction_rmse, "\n")
+cat("Interaction Model Test R²:", interaction_r2, "\n")
+
+```
+
+```{r}
+par(mfrow = c(2, 2))
+plot(mlr_interaction_model$finalModel)
+```
+
+The MLR with interaction terms provides a better fit compared to the standard MLR, improving predictive accuracy and capturing some meaningful relationships between features. However, residual patterns still suggest the presence of non-linearity in the data. To address this, we next explore a cubic polynomial regression model to better capture complex patterns and interactions.\
+
+### Feature Importance Analysis: What Drives Sales?
+
+To better understand the key factors behind video game sales, we analyze the regression coefficients from the Multiple Linear Regression model with interaction terms. This model incorporates both main effects and strategic feature interactions, offering a more nuanced view of how different variables work together to influence sales outcomes.
+
+We visualize the magnitude and direction of each coefficient, highlighting features that are statistically significant (p-value < 0.05). Positive coefficients suggest a direct relationship with sales, while negative ones indicate a potential negative impact.
+
+```{r}
+coefficients_df <- as.data.frame(summary(mlr_interaction_model$finalModel)$coefficients)
+colnames(coefficients_df) <- c("Estimate", "Std_Error", "t_value", "P_Value")ok 
+
+coefficients_df$Feature <- rownames(coefficients_df)
+rownames(coefficients_df) <- NULL
+
+coefficients_df_filtered <- coefficients_df %>% filter(Feature != "(Intercept)")
+
+coefficients_df_filtered$Significant <- ifelse(coefficients_df_filtered$P_Value < 0.05, "Significant", "Not Significant")
+
+ggplot(coefficients_df_filtered, aes(x = reorder(Feature, Estimate), y = Estimate, fill = Significant)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_fill_manual(values = c("Significant" = "green", "Not Significant" = "red")) +
+  labs(title = "Feature Importance: Significant (Green) vs. Non-Significant (Red)",
+       x = "Features", y = "Regression Coefficients") +
+  theme_minimal()
+```
+
+## 4.7 Polynomial Regression
+
+
+Polynomial regression enhances linear regression by introducing higher-degree terms, enabling the model to capture complex, non-linear relationships in the data.
+
+In this analysis, we generate polynomial features up to degree 3 (cubic terms) for key predictors to better model intricate sales patterns.
+
+```{r}
+library(polycor)
+library(caret)
+
+poly_features <- c("Critic_Score", "User_Score", "Critic_Count", "User_Count")
+
+# Start from the interaction-enhanced training set
+train_data_poly <- train_data_interaction
+test_data_poly <- test_data_interaction
+
+for (feature in poly_features) {
+  train_data_poly[[paste0(feature, "_sq")]] <- train_data[[feature]]^2
+  test_data_poly[[paste0(feature, "_sq")]] <- test_data[[feature]]^2
+  
+  train_data_poly[[paste0(feature, "_cub")]] <- train_data[[feature]]^3
+  test_data_poly[[paste0(feature, "_cub")]] <- test_data[[feature]]^3
+}
+
+set.seed(123)
+poly_model <- train(
+  Log_Global_Sales ~ ., 
+  data = train_data_poly, 
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+)
+```
+
+### Performance Evaluation
+
+```{r}
+poly_predictions <- predict(poly_model, test_data_poly)
+
+poly_rmse <- sqrt(mean((test_data_poly$Log_Global_Sales - poly_predictions)^2))
+poly_r2 <- cor(test_data_poly$Log_Global_Sales, poly_predictions)^2  
+
+cat("Polynomial Regression (Degree 3) Test RMSE:", poly_rmse, "\n")
+cat("Polynomial Regression (Degree 3) Test R²:", poly_r2, "\n")
+
+```
+
+### Feature Importance
+
+```{r}
+poly_coefficients <- summary(poly_model$finalModel)$coefficients
+head(poly_coefficients)
+```
+
+###  Residual Analysis
+
+```{r}
+par(mfrow = c(2, 2))
+plot(poly_model$finalModel)
+```
+This diagnostic plot for the Polynomial Regression model shows clear improvements over previous models. The residuals are more symmetrically distributed and show less curvature, indicating better model fit. The Q-Q plot aligns more closely with the normal line, suggesting improved normality. The scale-location plot reveals more stable variance, and although a few high-leverage points remain, their influence appears reduced. Compared to MLR, Ridge, and Lasso, the polynomial model better captures non-linearity and reduces heteroscedasticity, making it the strongest model so far—though some outliers and variance issues still persist.
+
+
+
+## 4.8 Regressions summary
+
+```{r}
+regression_results <- data.frame(
+  Model = c("Standard MLR", "MLR with Interactions","Ridge Regression", "Lasso Regression", "Polynomial Regression"),
+  RMSE = c(mlr_rmse, interaction_rmse, ridge_rmse, lasso_rmse, poly_rmse),
+  R2 = c(mlr_r2, interaction_r2, ridge_r2, lasso_r2, poly_r2)
+)
+
+print(regression_results)
+```
+Among the regression models tested, Polynomial Regression outperforms the rest with the lowest RMSE and highest R², effectively capturing non-linear patterns in video game sales. MLR with Interaction Terms comes next, improving over Standard MLR by incorporating meaningful feature interactions, especially between critic/user metrics and platform/time dynamics. Standard MLR provides a reasonable baseline but fails to account for more complex relationships. Ridge and Lasso Regression perform similarly to the baseline, with Lasso slightly underperforming due to feature selection. While regularization models help identify important predictors, their predictive accuracy remains limited compared to polynomial approaches.
+
