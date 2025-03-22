@@ -220,7 +220,6 @@ We apply **one-hot encoding** to categorical variables and **feature scaling** t
 ```{r}
 library(dplyr)
 
-# Load and clean the dataset
 games <- read.csv("./video_game_sales.csv") %>% na.omit()
 games <- games %>% dplyr::select(-Name, -NA_Sales, -EU_Sales, -JP_Sales, -Other_Sales)
 
@@ -236,24 +235,18 @@ games <- games %>%
   ) %>%
   filter(!is.na(Year_of_Release))
 
-# One-hot encoding (excluding Global_Sales from formula)
 games_encoded <- model.matrix(Log_Global_Sales ~ . - Global_Sales, data = games) %>% as.data.frame()
 
-# Make categorical columns binary (model.matrix already does this, but just in case)
 categorical_cols <- grep("^(Platform|Genre|Publisher|Rating)", colnames(games_encoded), value = TRUE)
 games_encoded[categorical_cols] <- lapply(games_encoded[categorical_cols], function(x) as.integer(x > 0))
 
-# Clean column names
 colnames(games_encoded) <- make.names(colnames(games_encoded), unique = TRUE)
 
-# Restore target variable
 games_encoded$Log_Global_Sales <- log1p(games$Global_Sales)
 
-# Remove near-zero variance predictors
 nzv_cols <- nearZeroVar(games_encoded, saveMetrics = TRUE)
 games_encoded <- games_encoded[, !nzv_cols$nzv]
 
-# Scale all features (including Year_of_Release)
 preprocess_model <- preProcess(
   games_encoded[, !(colnames(games_encoded) %in% c("Log_Global_Sales"))],
   method = c("center", "scale")
@@ -263,7 +256,6 @@ games_scaled <- games_encoded
 games_scaled[, !(colnames(games_scaled) %in% c("Log_Global_Sales"))] <-
   predict(preprocess_model, games_encoded[, !(colnames(games_encoded) %in% c("Log_Global_Sales"))])
 
-# Cross-validation setup
 train_control <- trainControl(method = "cv", number = 10)
 
 ```
@@ -539,7 +531,7 @@ lasso_coefs$Model <- "Lasso"
 feature_importance <- rbind(ridge_coefs, lasso_coefs)
 
 feature_importance <- feature_importance %>%
-  filter(Feature != "(Intercept)") %>%  # Drop Intercept
+  filter(Feature != "(Intercept)") %>%  
   arrange(desc(abs(Coefficient))) %>%
   head(30)
 
@@ -628,7 +620,7 @@ We visualize the magnitude and direction of each coefficient, highlighting featu
 
 ```{r}
 coefficients_df <- as.data.frame(summary(mlr_interaction_model$finalModel)$coefficients)
-colnames(coefficients_df) <- c("Estimate", "Std_Error", "t_value", "P_Value")ok 
+colnames(coefficients_df) <- c("Estimate", "Std_Error", "t_value", "P_Value")
 
 coefficients_df$Feature <- rownames(coefficients_df)
 rownames(coefficients_df) <- NULL
@@ -647,6 +639,44 @@ ggplot(coefficients_df_filtered, aes(x = reorder(Feature, Estimate), y = Estimat
   theme_minimal()
 ```
 
+
+### Visualizing the Influence of Ratings
+
+To better understand the interaction, we plot **predicted sales** against **user scores**, color-coded by **critic scores**.
+
+```{r}
+interaction_predictions <- suppressWarnings(predict(mlr_interaction_model, test_data_interaction))
+
+interaction_plot_data <- test_data_interaction %>%
+  mutate(Predicted_Sales = interaction_predictions) %>%
+  dplyr::select(User_Score, Critic_Score, Predicted_Sales)
+
+plot1 <- ggplot(interaction_plot_data, aes(x = User_Score, y = Predicted_Sales, color = Critic_Score)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(aes(group = 1), method = "lm", formula = y ~ x, se = FALSE, color = "black") +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(title = "Critic Score vs. User Score",
+       x = "User Score", y = "Predicted Log Sales",
+       color = "Critic Score") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+plot2 <- ggplot(interaction_plot_data, aes(x = Critic_Score, y = Predicted_Sales, color = User_Score)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(aes(group = 1), method = "lm", formula = y ~ x, se = FALSE, color = "black") +
+  scale_color_gradient(low = "purple", high = "orange") +
+  labs(title = "User Score vs. Critic Score",
+       x = "Critic Score", y = "Predicted Log Sales",
+       color = "User Score") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+combined_plot <- (plot1 + plot2) + 
+  plot_annotation(title = "Interaction Effects: Critic Score & User Score",
+                 theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)))
+
+print(combined_plot)
+```
 ## 4.7 Polynomial Regression
 
 
@@ -660,7 +690,6 @@ library(caret)
 
 poly_features <- c("Critic_Score", "User_Score", "Critic_Count", "User_Count")
 
-# Start from the interaction-enhanced training set
 train_data_poly <- train_data_interaction
 test_data_poly <- test_data_interaction
 
@@ -694,12 +723,6 @@ cat("Polynomial Regression (Degree 3) Test R²:", poly_r2, "\n")
 
 ```
 
-### Feature Importance
-
-```{r}
-poly_coefficients <- summary(poly_model$finalModel)$coefficients
-head(poly_coefficients)
-```
 
 ###  Residual Analysis
 
@@ -723,4 +746,723 @@ regression_results <- data.frame(
 print(regression_results)
 ```
 Among the regression models tested, Polynomial Regression outperforms the rest with the lowest RMSE and highest R², effectively capturing non-linear patterns in video game sales. MLR with Interaction Terms comes next, improving over Standard MLR by incorporating meaningful feature interactions, especially between critic/user metrics and platform/time dynamics. Standard MLR provides a reasonable baseline but fails to account for more complex relationships. Ridge and Lasso Regression perform similarly to the baseline, with Lasso slightly underperforming due to feature selection. While regularization models help identify important predictors, their predictive accuracy remains limited compared to polynomial approaches.
+
+# 5. Classification Models
+
+## 5.1 Motivation and Overview
+
+While regression models provided useful insights, the highest R² reached only around 50%, meaning a large portion of the variance in video game sales remained unexplained. To complement the regression analysis and gain a broader perspective, we turn to **classification models**.
+
+Instead of predicting exact sales numbers, classification allows us to group games into performance tiers, making it easier to analyze patterns and extract actionable insights.
+
+We define three **Sales Categories**:
+
+- **Low Sales**: Less than 0.5 million units  
+- **Moderate Sales**: Between 0.5 and 2 million units  
+- **High Sales**: More than 2 million units  
+
+To predict these categories, we apply and compare three supervised learning models:
+
+- **Decision Tree**: A simple, interpretable baseline model.  
+- **Random Forest**: An ensemble of decision trees to improve accuracy and reduce overfitting.  
+- **XGBoost**: A powerful boosting-based model known for its performance and feature importance insights.
+
+## 5.2 Classification Model: Decision Tree
+
+We define the following three **Sales Categories** based on `Global_Sales`:
+
+- **Low Sales**: Less than 0.5 million units  
+- **Moderate Sales**: Between 0.5 and 2 million units  
+- **High Sales**: More than 2 million units  
+
+Interaction terms previously found important in regression models are included to enhance classification accuracy.
+
+#### Model Training
+
+```{r}
+library(rpart)
+library(rpart.plot)
+library(dplyr)
+
+train_data_interaction_copy <- train_data_interaction
+test_data_interaction_copy <- test_data_interaction
+
+train_data_interaction_copy$Sales_Category <- cut(train_data_interaction_copy$Log_Global_Sales, 
+                                                  breaks = c(-Inf, log1p(0.5), log1p(2), Inf),  
+                                                  labels = c("Low", "Moderate", "High"))
+
+test_data_interaction_copy$Sales_Category <- cut(test_data_interaction_copy$Log_Global_Sales, 
+                                                 breaks = c(-Inf, log1p(0.5), log1p(2), Inf),  
+                                                 labels = c("Low", "Moderate", "High"))
+
+train_data_interaction_copy$Sales_Category <- as.factor(train_data_interaction_copy$Sales_Category)
+test_data_interaction_copy$Sales_Category <- as.factor(test_data_interaction_copy$Sales_Category)
+
+train_data_interaction_copy <- dplyr::select(train_data_interaction_copy, -Log_Global_Sales)
+test_data_interaction_copy <- dplyr::select(test_data_interaction_copy, -Log_Global_Sales)
+
+set.seed(123)
+genre_tree_interaction <- rpart(Sales_Category ~ ., 
+                                data = train_data_interaction_copy,
+                                method = "class")
+
+rpart.plot(genre_tree_interaction, type = 3, extra = 101)
+```
+
+#### Model Evaluation
+
+```{r}
+test_data_interaction_copy$Sales_Category <- factor(test_data_interaction_copy$Sales_Category, 
+                                                    levels = levels(train_data_interaction_copy$Sales_Category))
+
+predicted_categories <- predict(genre_tree_interaction, test_data_interaction_copy, type = "class")
+predicted_categories <- factor(predicted_categories, 
+                               levels = levels(test_data_interaction_copy$Sales_Category))
+conf_matrix <- table(Predicted = predicted_categories, Actual = test_data_interaction_copy$Sales_Category)
+print(conf_matrix)
+
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+cat("Model Accuracy:", round(accuracy * 100, 2), "%\n")
+
+classification_report <- confusionMatrix(predicted_categories, test_data_interaction_copy$Sales_Category)
+
+precision <- classification_report$byClass[, "Precision"]
+recall <- classification_report$byClass[, "Recall"]
+f1_score <- classification_report$byClass[, "F1"]
+
+cat("\nPrecision (by class):\n")
+print(precision)
+
+cat("\nRecall (by class):\n")
+print(recall)
+
+cat("\nF1-Score (by class):\n")
+print(f1_score)
+```
+The Decision Tree classifier achieved an overall accuracy of 70%, with particularly strong performance in identifying low sales games. It demonstrated high recall (88%) and solid precision (77%) for the Low category, meaning it correctly identified most games with poor sales. However, the model struggled with the Moderate and High categories. Precision and recall were lower for Moderate sales, and recall was especially poor for High sales games (only ~23%), indicating many were misclassified. While the model captures clear signals for underperforming titles, it has difficulty distinguishing between moderate and high performers.
+
+## 5.3 Classification Model: Predicting Sales with Random Forest
+
+To enhance predictive accuracy and assess the **impact of various factors on sales stability**, we train a **Random Forest classifier**.\
+Sales are categorized into three groups:\
+- **Low Sales (\< 0.5M units)**\
+- **Moderate Sales (0.5M - 2M units)**\
+- **High Sales (\> 2M units)**
+
+Unlike decision trees, **Random Forest aggregates multiple decision trees** to reduce overfitting and improve generalization.
+
+```{r}
+suppressPackageStartupMessages({
+  library(randomForest)
+  library(dplyr)
+  library(caret)
+})
+
+common_features <- setdiff(intersect(colnames(train_data_interaction), colnames(test_data_interaction)), "Log_Global_Sales")
+
+train_data_rf <- train_data_interaction[, c(common_features, "Log_Global_Sales")]
+test_data_rf <- test_data_interaction[, c(common_features, "Log_Global_Sales")]
+
+train_data_rf$Sales_Category <- cut(train_data_rf$Log_Global_Sales, 
+                                    breaks = c(-Inf, log1p(0.5), log1p(2), Inf),  
+                                    labels = c("Low", "Moderate", "High"))
+
+test_data_rf$Sales_Category <- cut(test_data_rf$Log_Global_Sales, 
+                                   breaks = c(-Inf, log1p(0.5), log1p(2), Inf),  
+                                   labels = c("Low", "Moderate", "High"))
+
+train_data_rf$Sales_Category <- as.factor(train_data_rf$Sales_Category)
+test_data_rf$Sales_Category <- as.factor(test_data_rf$Sales_Category)
+
+train_data_rf <- dplyr::select(train_data_rf, -Log_Global_Sales)
+test_data_rf <- dplyr::select(test_data_rf, -Log_Global_Sales)
+
+set.seed(123)
+rf_interaction <- randomForest(Sales_Category ~ ., 
+                               data = train_data_rf,
+                               ntree = 500, 
+                               importance = TRUE)
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+importance_df <- as.data.frame(importance(rf_interaction))
+importance_df$Feature <- rownames(importance_df)
+
+importance_long <- importance_df %>%
+  dplyr::select(Feature, MeanDecreaseAccuracy, MeanDecreaseGini) %>%
+  tidyr::pivot_longer(cols = c(MeanDecreaseAccuracy, MeanDecreaseGini), 
+                      names_to = "Metric", values_to = "Importance")
+
+ggplot(importance_long, aes(x = reorder(Feature, Importance), y = Importance, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Feature Importance in Random Forest",
+       x = "Features",
+       y = "Importance Score",
+       fill = "Metric") +
+  theme_minimal()
+
+```
+#### Model Evaluation on Test Data
+
+```{r}
+library(caret)
+
+
+test_data_interaction_copy$Sales_Category <- factor(test_data_interaction_copy$Sales_Category, 
+                                               levels = levels(train_data_interaction_copy$Sales_Category))
+
+predicted_categories_rf <- predict(rf_interaction, test_data_interaction_copy)
+
+predicted_categories_rf <- factor(predicted_categories_rf, 
+                               levels = levels(test_data_interaction_copy$Sales_Category))
+
+conf_matrix_rf <- table(Predicted = predicted_categories_rf, Actual = test_data_interaction_copy$Sales_Category)
+print(conf_matrix_rf)
+
+accuracy_rf <- sum(diag(conf_matrix_rf)) / sum(conf_matrix_rf)
+cat("Model Accuracy:", round(accuracy_rf * 100, 2), "%\n")
+
+classification_report_rf <- confusionMatrix(predicted_categories_rf, test_data_interaction_copy$Sales_Category)
+
+precision_rf <- classification_report_rf$byClass[, "Precision"]
+recall_rf <- classification_report_rf$byClass[, "Recall"]
+f1_score_rf <- classification_report_rf$byClass[, "F1"]
+
+cat("\nPrecision (by class):\n")
+print(precision_rf)
+
+cat("\nRecall (by class):\n")
+print(recall_rf)
+
+cat("\nF1-Score (by class):\n")
+print(f1_score_rf)
+
+```
+
+The Random Forest classifier outperformed the Decision Tree in overall accuracy, achieving 74.4% compared to the Decision Tree’s 70%. It also showed stronger precision across all classes, especially for predicting high sales, where it notably improved from 0.76 to 0.80. However, recall for high and moderate sales remained moderate, meaning the model still struggles to fully capture those categories. Overall, Random Forest offers better generalization and balance between precision and recall, making it a more reliable model than a single Decision Tree for predicting sales categories.
+
+## 5.4 Classification Model: Predicting Sales with XGBoost
+
+To enhance the predictive performance of our sales classification model, we implement **XGBoost (Extreme Gradient Boosting)**, a powerful machine learning algorithm that improves upon traditional decision trees by iteratively optimizing weak learners. Unlike **Random Forest**, which builds independent trees, **XGBoost corrects misclassifications at each step**, making it more effective in handling **imbalanced data and complex relationships**.
+
+### Model Training
+
+```{r}
+suppressWarnings(library(xgboost))
+library(caret)
+library(dplyr)
+
+common_features <- setdiff(intersect(colnames(train_data_interaction_copy), colnames(test_data_interaction_copy)), "Log_Global_Sales")
+
+
+train_data_xgb <- train_data_interaction_copy
+test_data_xgb <- test_data_interaction_copy
+
+train_data_xgb$Sales_Category <- as.numeric(factor(train_data_xgb$Sales_Category, levels = c("Low", "Moderate", "High"))) - 1
+test_data_xgb$Sales_Category <- as.numeric(factor(test_data_xgb$Sales_Category, levels = c("Low", "Moderate", "High"))) - 1
+
+feature_cols <- setdiff(common_features, "Sales_Category")
+
+dtrain <- xgb.DMatrix(data = as.matrix(train_data_xgb[, feature_cols]), label = train_data_xgb$Sales_Category)
+dtest <- xgb.DMatrix(data = as.matrix(test_data_xgb[, feature_cols]), label = test_data_xgb$Sales_Category)
+
+params <- list(
+  objective = "multi:softmax",
+  num_class = 3, 
+  eval_metric = "mlogloss", 
+  eta = 0.1, 
+  max_depth = 6, 
+  subsample = 0.8, 
+  colsample_bytree = 0.8
+)
+
+set.seed(123)
+xgb_model <- xgb.train(params = params, data = dtrain, nrounds = 300, watchlist = list(train = dtrain), verbose = 0)
+```
+
+### Feature Importance Analysis
+
+To understand which factors contribute most to game sales classification, we analyze **feature importance scores** generated by XGBoost.
+
+```{r}
+importance_matrix <- xgb.importance(feature_names = feature_cols, model = xgb_model)
+
+ggplot(importance_matrix, aes(x = reorder(Feature, Gain), y = Gain, fill = Feature)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Feature Importance in XGBoost",
+       x = "Features",
+       y = "Importance Score") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+```
+
+### Model Evaluation
+
+We evaluate XGBoost’s performance using **accuracy, precision, recall, and F1-score** to compare it with previous models.
+
+```{r}
+predicted_categories_xgb <- predict(xgb_model, dtest)
+
+predicted_categories_xgb <- factor(predicted_categories_xgb, levels = c(0, 1, 2), labels = c("Low", "Moderate", "High"))
+test_data_xgb$Sales_Category <- factor(test_data_xgb$Sales_Category, levels = c(0, 1, 2), labels = c("Low", "Moderate", "High"))
+
+conf_matrix_xgb <- table(Predicted = predicted_categories_xgb, Actual = test_data_xgb$Sales_Category)
+print(conf_matrix_xgb)
+
+accuracy_xgb <- sum(diag(conf_matrix_xgb)) / sum(conf_matrix_xgb)
+cat("XGBoost Model Accuracy:", round(accuracy_xgb * 100, 2), "%\n")
+
+classification_report_xgb <- confusionMatrix(predicted_categories_xgb, test_data_xgb$Sales_Category)
+
+precision_xgb <- classification_report_xgb$byClass[, "Precision"]
+recall_xgb <- classification_report_xgb$byClass[, "Recall"]
+f1_score_xgb <- classification_report_xgb$byClass[, "F1"]
+
+cat("\nPrecision (by class):\n")
+print(precision_xgb)
+
+cat("\nRecall (by class):\n")
+print(recall_xgb)
+
+cat("\nF1-Score (by class):\n")
+print(f1_score_xgb)
+```
+
+The XGBoost classifier outperforms both the Decision Tree and Random Forest models, achieving the highest overall accuracy. It demonstrates strong precision and recall for the Low Sales category, and notably better performance for Moderate and High Sales classes compared to earlier models. While it still struggles somewhat with recall on high sales predictions, its improved balance across all classes—especially evident in F1-scores—shows that XGBoost is more effective at capturing complex patterns in the data. This makes it a strong candidate for predicting sales categories in a multi-class setting.
+
+
+## 5.5 Insights from SHAP Analysis: What Drives Sales?
+
+To complement our regression and classification models, we leveraged SHAP (SHapley Additive exPlanations) to gain deeper, model-agnostic insights into how different features influence game sales. This section visualizes those impacts across genres, platforms, publishers, and over time — revealing patterns that might not be obvious from raw performance metrics alone.
+
+Below are some questions and insights raised from the SHAP visualizations:
+
+
+### How do critic and user reviews influence game sales across different genres?
+
+```{r}
+library(SHAPforxgboost)
+
+X_test_matrix <- as.matrix(test_data_xgb[, feature_cols])
+
+params_shap <- params
+params_shap$objective <- "multi:softprob"
+
+xgb_model_shap <- xgb.train(params = params_shap, 
+                            data = dtrain, 
+                            nrounds = 300, 
+                            watchlist = list(train = dtrain),
+                            verbose = 0)
+
+shap_contrib <- predict(xgb_model_shap, newdata = dtest, predcontrib = TRUE)
+
+shap_values_df <- as.data.frame(shap_contrib)
+
+shap_values_df$BIAS <- NULL
+
+shap_values_df$Genre <- test_data_xgb_copy$Genre
+
+shap_genre <- shap_values_df %>%
+  group_by(Genre) %>%
+  summarise(
+    Mean_Critic_Score_Impact = mean(Critic_Score, na.rm = TRUE),
+    Mean_User_Score_Impact = mean(User_Score, na.rm = TRUE),
+    Mean_Critic_Interaction = mean(Critic_Interaction, na.rm = TRUE),
+    Mean_User_Interaction = mean(User_Interaction, na.rm = TRUE)
+  )
+
+shap_genre_long <- shap_genre %>%
+  pivot_longer(cols = -Genre, names_to = "Feature", values_to = "Mean_Impact")
+
+ggplot(shap_genre_long, aes(x = Genre, y = Mean_Impact, fill = Feature)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Impact of Critic & User Reviews by Genre (SHAP - XGBoost)",
+       x = "Game Genre", y = "Mean SHAP Value",
+       fill = "Feature") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+This plot highlights how review-related features contribute differently across genres. In genres like Fighting, Misc, and Racing, critic interactions (Critic Score × Critic Count) show strong positive SHAP values, indicating that professional reviews heavily drive sales. In contrast, Sports games are negatively impacted by critic interactions, suggesting that critical evaluations may hurt their performance, possibly due to repetitive releases. User interaction has moderate influence in genres such as Platform and Shooter, hinting that player feedback and community response matter more in those spaces. The combined presence of user and critic signals across genres like Shooter reflects a balanced influence, where both expert reviews and player opinions help shape sales outcomes.
+
+
+### Which platforms are more influenced by critic and user reviews when it comes to sales performance?
+
+```{r}
+
+library(SHAPforxgboost)
+
+params_shap <- params
+params_shap$objective <- "multi:softprob"
+
+xgb_model_shap <- xgb.train(params = params_shap,
+                            data = dtrain,
+                            nrounds = 300,
+                            verbose = 0)
+
+shap_contrib <- predict(xgb_model_shap, newdata = dtest, predcontrib = TRUE)
+
+shap_values_df <- as.data.frame(shap_contrib)
+shap_values_df$BIAS <- NULL 
+
+test_data_xgb_copy <- test_data_xgb
+
+platform_cols <- c("PlatformDS", "PlatformGC", "PlatformPC", "PlatformPS2", "PlatformPS3",
+                   "PlatformPSP", "PlatformWii", "PlatformX360", "PlatformXB")
+
+test_data_xgb_copy[platform_cols] <- lapply(test_data_xgb_copy[platform_cols], as.numeric)
+
+test_data_xgb_copy$Platform <- apply(test_data_xgb_copy[platform_cols], 1, function(row) {
+  selected_platforms <- platform_cols[row > 0]
+  selected_platforms <- gsub("Platform", "", selected_platforms)
+  if (length(selected_platforms) > 0) {
+    paste(selected_platforms, collapse = ", ")
+  } else {
+    "Other"
+  }
+})
+
+shap_values_df$Platform <- test_data_xgb_copy$Platform
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+shap_platform <- shap_values_df %>%
+  group_by(Platform) %>%
+  summarise(
+    Mean_Critic_Score_Impact = mean(Critic_Score, na.rm = TRUE),
+    Mean_User_Score_Impact = mean(User_Score, na.rm = TRUE),
+    Mean_Critic_Interaction = mean(Critic_Interaction, na.rm = TRUE),
+    Mean_User_Interaction = mean(User_Interaction, na.rm = TRUE)
+  )
+
+shap_platform_long <- shap_platform %>%
+  pivot_longer(cols = -Platform, names_to = "Feature", values_to = "Mean_Impact")
+
+ggplot(shap_platform_long, aes(x = Platform, y = Mean_Impact, fill = Feature)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Impact of Critic & User Reviews by Platform",
+       x = "Game Platform", y = "Mean SHAP Value",
+       fill = "Feature") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+Critic reviews have a particularly strong impact on platforms like Wii and DS, where critic score interactions dominate. PC and X360 show a weaker or even negative critic influence, suggesting user feedback may be more relevant there. User interaction contributes moderately across platforms but plays a stronger role on XB and GC, highlighting platform-specific differences in how players and critics drive sales.
+
+### How has the importance of different game genres in predicting sales changed over time?
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(zoo)
+library(SHAPforxgboost)
+
+params$objective <- "multi:softprob"
+
+xgb_model_shap <- xgb.train(params = params,
+                            data = dtrain,
+                            nrounds = 300,
+                            verbose = 0)
+
+shap_contrib <- predict(xgb_model_shap, newdata = dtest, predcontrib = TRUE)
+
+shap_values_df <- as.data.frame(shap_contrib)
+shap_values_df$BIAS <- NULL
+test_data_xgb_copy <- test_data_xgb
+
+test_data_xgb_copy <- test_data_xgb_copy %>%
+  filter(!is.na(Year_of_Release)) %>%
+  mutate(Year_of_Release = as.numeric(Year_of_Release))
+
+year_mean <- preprocess_model$mean["Year_of_Release"]
+year_sd <- preprocess_model$std["Year_of_Release"]
+test_data_xgb_copy$Year_of_Release <- test_data_xgb_copy$Year_of_Release * year_sd + year_mean
+
+genre_cols <- c("GenreFighting", "GenreMisc", "GenrePlatform", 
+                "GenreRacing", "GenreRole.Playing", "GenreShooter", "GenreSports")
+
+test_data_xgb_copy$Genre <- apply(test_data_xgb_copy[genre_cols], 1, function(row) {
+  selected_genres <- genre_cols[row > 0]
+  selected_genres <- gsub("Genre", "", selected_genres)
+  if (length(selected_genres) > 0) {
+    paste(selected_genres, collapse = ", ")
+  } else {
+    "Other"
+  }
+})
+
+shap_values_df$Genre <- test_data_xgb_copy$Genre
+shap_values_df$Year_of_Release <- test_data_xgb_copy$Year_of_Release
+
+shap_genre_time <- shap_values_df %>%
+  group_by(Year_of_Release, Genre) %>%
+  summarise(
+    Mean_Genre_Impact = mean(Genre_Shooter_Critic, na.rm = TRUE)
+  ) %>%
+  filter(!is.na(Year_of_Release) & !is.na(Genre))
+
+top_genres <- shap_genre_time %>%
+  group_by(Genre) %>%
+  summarise(Mean_Impact = mean(Mean_Genre_Impact, na.rm = TRUE)) %>%
+  top_n(4, Mean_Impact) %>%
+  pull(Genre)
+
+shap_genre_time <- shap_genre_time %>%
+  filter(Genre %in% top_genres)
+
+shap_genre_time_long <- shap_genre_time %>%
+  pivot_longer(cols = -c(Year_of_Release, Genre), names_to = "Feature", values_to = "Mean_Impact") %>%
+  filter(!is.na(Mean_Impact) & !is.infinite(Mean_Impact)) %>%
+  arrange(Genre, Year_of_Release) %>%
+  group_by(Genre) %>%
+  mutate(Smoothed_Impact = rollmean(Mean_Impact, k = 3, fill = NA, align = "center")) %>%
+  ungroup()
+
+ggplot(shap_genre_time_long, aes(x = Year_of_Release, y = Mean_Impact, color = Genre, group = Genre)) +
+  geom_line(size = 1, alpha = 0.8) +
+  geom_point(size = 2, alpha = 0.6) +
+  geom_smooth(aes(y = Smoothed_Impact), method = "loess", se = FALSE,
+              linetype = "dashed", size = 1.2, alpha = 0.5) +
+  scale_x_continuous(
+    breaks = seq(min(shap_genre_time_long$Year_of_Release, na.rm = TRUE),
+                 max(shap_genre_time_long$Year_of_Release, na.rm = TRUE), by = 2),
+    labels = function(x) format(round(x), nsmall = 0)
+  ) +
+  labs(
+    title = "Evolution of Genre Importance in Predicting Game Sales",
+    subtitle = "Tracking SHAP Value Trends for Top 4 Genres Over Time (Smoothed Trends)",
+    x = "Year of Release",
+    y = "Mean SHAP Value (Genre Impact)",
+    color = "Genre"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic")
+  )
+
+```
+The Shooter genre had the strongest influence on game sales in the early 2000s, with consistently high SHAP values until around 2010, after which its impact gradually declined. Other genres like Platform, Misc, and Fighting remained relatively stable and less influential throughout the years, suggesting that the market became more diverse or less genre-driven over time.
+
+### How did the influence of major publishers on game sales evolve over the years?
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(zoo)
+library(SHAPforxgboost)
+
+params$objective <- "multi:softprob"
+
+xgb_model_shap <- xgb.train(params = params,
+                            data = dtrain,
+                            nrounds = 300,
+                            verbose = 0)
+
+shap_contrib <- predict(xgb_model_shap, newdata = dtest, predcontrib = TRUE)
+
+shap_values_df <- as.data.frame(shap_contrib)
+shap_values_df$BIAS <- NULL
+test_data_xgb_copy <- test_data_xgb
+
+test_data_xgb_copy <- test_data_xgb_copy %>%
+  filter(!is.na(Year_of_Release)) %>%
+  mutate(Year_of_Release = as.numeric(Year_of_Release))
+
+year_mean <- preprocess_model$mean["Year_of_Release"]
+year_sd <- preprocess_model$std["Year_of_Release"]
+test_data_xgb_copy$Year_of_Release <- test_data_xgb_copy$Year_of_Release * year_sd + year_mean
+publisher_cols <- c("PublisherActivision", "PublisherElectronic.Arts", "PublisherUbisoft")
+
+test_data_xgb_copy[publisher_cols] <- lapply(test_data_xgb_copy[publisher_cols], as.numeric)
+
+test_data_xgb_copy$Publisher <- apply(test_data_xgb_copy[publisher_cols], 1, function(row) {
+  selected_publishers <- publisher_cols[row > 0]  
+  selected_publishers <- gsub("Publisher", "", selected_publishers)  
+  if (length(selected_publishers) > 0) {
+    paste(selected_publishers, collapse = ", ") 
+  } else {
+    "Other"  
+  }
+})
+
+test_data_xgb_copy <- test_data_xgb_copy %>%
+  filter(!is.na(Publisher))
+
+shap_values_df$Publisher <- test_data_xgb_copy$Publisher
+shap_values_df$Year_of_Release <- test_data_xgb_copy$Year_of_Release
+
+shap_publisher_time <- shap_values_df %>%
+  group_by(Year_of_Release, Publisher) %>%
+  summarise(
+    Mean_Publisher_Impact = mean(Publisher_EA_Critic, na.rm = TRUE)  # Use a publisher-related SHAP value
+  ) %>%
+  filter(!is.na(Year_of_Release) & !is.na(Publisher))  # Remove missing values
+
+selected_publishers <- c("Activision", "Electronic.Arts", "Ubisoft")
+
+shap_publisher_time <- shap_publisher_time %>%
+  filter(Publisher %in% selected_publishers)
+
+shap_publisher_time_long <- shap_publisher_time %>%
+  pivot_longer(cols = -c(Year_of_Release, Publisher), names_to = "Feature", values_to = "Mean_Impact")
+
+shap_publisher_time_long <- shap_publisher_time_long %>%
+  filter(!is.na(Mean_Impact) & !is.infinite(Mean_Impact))
+
+shap_publisher_time_long <- shap_publisher_time_long %>%
+  arrange(Publisher, Year_of_Release) %>%
+  group_by(Publisher) %>%
+  mutate(Smoothed_Impact = rollmean(Mean_Impact, k = 3, fill = NA, align = "center")) %>%
+  ungroup()
+
+ggplot(shap_publisher_time_long, aes(x = Year_of_Release, y = Mean_Impact, color = Publisher, group = Publisher)) +
+  geom_line(size = 1, alpha = 0.8) +  
+  geom_point(size = 2, alpha = 0.6) + 
+  geom_smooth(aes(y = Smoothed_Impact), method = "loess", se = FALSE, linetype = "dashed", size = 1.2, alpha = 0.5) + 
+  scale_x_continuous(breaks = seq(min(shap_publisher_time_long$Year_of_Release, na.rm = TRUE), 
+                                  max(shap_publisher_time_long$Year_of_Release, na.rm = TRUE), by = 2)) +  
+  labs(
+    title = "Evolution of Publisher Influence on Game Sales",
+    subtitle = "Tracking SHAP Value Trends for Major Publishers Over Time",
+    x = "Year of Release", 
+    y = "Mean SHAP Value (Publisher Impact)",
+    color = "Publisher"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic")
+  )
+
+
+
+```
+Ubisoft and Activision maintained consistently positive influence on sales, indicating their strong market presence. In contrast, Electronic Arts (EA) showed a negative SHAP impact across most years, suggesting its games were less associated with strong sales performance despite its size—highlighting a potential gap between popularity and performance. 
+
+### Which genres are most successful on specific platforms based on SHAP impact?
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+test_data_xgb_copy <- test_data_xgb
+
+test_data_xgb_copy <- test_data_xgb_copy %>%
+  filter(!is.na(Year_of_Release)) %>%
+  mutate(Year_of_Release = as.numeric(Year_of_Release))
+
+platform_cols <- c("PlatformDS", "PlatformGC", "PlatformPC", 
+                   "PlatformPS2", "PlatformPS3", "PlatformPSP", 
+                   "PlatformWii", "PlatformX360", "PlatformXB")
+
+genre_cols <- c("GenreFighting", "GenreMisc", "GenrePlatform", 
+                "GenreRacing", "GenreRole.Playing", "GenreShooter", "GenreSports")
+
+test_data_xgb_copy$Platform <- apply(test_data_xgb_copy[platform_cols], 1, function(row) {
+  selected_platforms <- platform_cols[row > 0]  
+  selected_platforms <- gsub("Platform", "", selected_platforms)  # Remove prefix
+  if (length(selected_platforms) > 0) {
+    paste(selected_platforms, collapse = ", ")
+  } else {
+    "Other"  
+  }
+})
+
+test_data_xgb_copy$Genre <- apply(test_data_xgb_copy[genre_cols], 1, function(row) {
+  selected_genres <- genre_cols[row > 0]  
+  selected_genres <- gsub("Genre", "", selected_genres)  
+  if (length(selected_genres) > 0) {
+    paste(selected_genres, collapse = ", ") 
+  } else {
+    "Other" 
+  }
+})
+
+shap_values_df$Platform <- test_data_xgb_copy$Platform
+shap_values_df$Genre <- test_data_xgb_copy$Genre
+
+shap_platform_genre <- shap_values_df %>%
+  group_by(Platform, Genre) %>%
+  summarise(
+    Mean_Genre_Impact = mean(Genre_Shooter_Critic, na.rm = TRUE)   
+  ) %>%
+  filter(!is.na(Platform) & !is.na(Genre))  
+
+shap_platform_genre_long <- shap_platform_genre %>%
+  pivot_longer(cols = -c(Platform, Genre), names_to = "Feature", values_to = "Mean_Impact")
+
+shap_platform_genre_long <- shap_platform_genre_long %>%
+  filter(!is.na(Mean_Impact) & !is.infinite(Mean_Impact))
+
+ggplot(shap_platform_genre_long, aes(x = Genre, y = Platform, fill = Mean_Impact)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(
+    title = "Which Genres Perform Best on Which Platforms?",
+    subtitle = "Heatmap Showing Genre SHAP Impact Across Platforms",
+    x = "Genre", 
+    y = "Platform",
+    fill = "Mean SHAP Value"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 12),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, face = "italic")
+  )
+
+
+```
+
+The heatmap reveals that Shooter games consistently have the highest positive SHAP impact across platforms like PS2, PS3, PSP, and X360, highlighting a strong genre-platform synergy. Platform and Racing genres also show moderate success on platforms like PC and Wii, while genres such as Misc and Other exhibit varied influence depending on the system. This suggests genre preference is closely tied to platform user demographics and game optimization.
+
+Absolutely! Here's an enhanced and more impactful **Section 6** that emphasizes the broader value of your project and the significance of your findings — especially the strength of the XGBoost model.
+
+---
+
+## 6. Conclusion & Real-World Impact
+
+In this project, we conducted an end-to-end analysis of video game sales, combining regression, classification, feature engineering, and SHAP-based interpretability to uncover what truly drives a game’s commercial performance. From raw data cleaning to advanced machine learning models, each step was designed not just to predict sales, but to understand the **why behind success**.
+
+### Core Achievements:
+- We explored multiple modeling approaches and found that **XGBoost classification** provided the best balance between predictive accuracy and interpretability — outperforming traditional models like linear regression, ridge, lasso, and decision trees.
+- Through **feature interactions and polynomial expansions**, we captured complex, non-linear relationships that traditional models couldn’t detect.
+- Our SHAP analysis went beyond accuracy metrics to **explain how critic reviews, user feedback, genres, platforms, and publishers interact** in shaping sales outcomes.
+
+### Real-World Applications & Value:
+This work has practical value for a wide range of stakeholders in the gaming industry:
+- **Publishers and studios** can use these insights to optimize marketing strategies and platform selection.
+- **Developers** can better understand how gameplay genres and review metrics translate into commercial success.
+- **Market analysts** and **investors** can use this framework to forecast performance of upcoming releases or evaluate the strengths of publisher portfolios.
+- Our approach also demonstrates a **reusable pipeline** for analyzing sales behavior in other industries like movies, music, mobile apps, and e-commerce.
+
+### The Bigger Picture:
+Ultimately, this project is not just about predicting sales — it’s about understanding the ecosystem of success in gaming. By identifying the most influential features and how their impact shifts across time, platforms, and publishers, we transform data into meaningful insights that can **inform real decisions**, shape product direction, and **drive competitive advantage** in a fast-moving industry.
+
+
 
